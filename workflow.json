@@ -1,0 +1,440 @@
+{
+  "name": "AI Support Ticket Classifier",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger-manual",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [240, 260]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "={{ $env.CRON_SCHEDULE || '0 */6 * * *' }}"
+            }
+          ]
+        }
+      },
+      "id": "trigger-schedule",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 460]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "={{ $env.WEBHOOK_PATH || 'tickets' }}",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "trigger-webhook",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 800],
+      "webhookId": "ticket-classifier-webhook"
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "fileSelector": "={{ $env.INPUT_CSV_PATH }}",
+        "options": {}
+      },
+      "id": "read-input-csv",
+      "name": "Read Input CSV",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [480, 360],
+      "onError": "stopWorkflow"
+    },
+    {
+      "parameters": {
+        "operation": "csv",
+        "options": {}
+      },
+      "id": "extract-csv-rows",
+      "name": "Extract CSV Rows",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [720, 360],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "a1", "name": "ticket_id",      "value": "={{ String($json.ticket_id ?? '').trim() }}",       "type": "string" },
+            { "id": "a2", "name": "subject",        "value": "={{ String($json.subject ?? '').trim() }}",         "type": "string" },
+            { "id": "a3", "name": "message",        "value": "={{ String($json.message ?? '').trim() }}",         "type": "string" },
+            { "id": "a4", "name": "customer_email", "value": "={{ String($json.customer_email ?? '').trim() }}",  "type": "string" },
+            { "id": "a5", "name": "source",         "value": "csv",                                                "type": "string" }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "normalize-csv",
+      "name": "Normalize CSV Ticket",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [960, 360]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "b1", "name": "ticket_id",      "value": "={{ String($json.body?.ticket_id      ?? $json.ticket_id      ?? '').trim() }}", "type": "string" },
+            { "id": "b2", "name": "subject",        "value": "={{ String($json.body?.subject        ?? $json.subject        ?? '').trim() }}", "type": "string" },
+            { "id": "b3", "name": "message",        "value": "={{ String($json.body?.message        ?? $json.message        ?? '').trim() }}", "type": "string" },
+            { "id": "b4", "name": "customer_email", "value": "={{ String($json.body?.customer_email ?? $json.customer_email ?? '').trim() }}", "type": "string" },
+            { "id": "b5", "name": "source",         "value": "webhook", "type": "string" },
+            { "id": "b6", "name": "_auth_token",    "value": "={{ $json.headers?.['x-webhook-token'] || '' }}", "type": "string" }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "normalize-webhook",
+      "name": "Normalize Webhook Ticket",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [720, 800]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.OPENAI_API_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({\n  model: $env.LLM_MODEL || 'gpt-4o-mini',\n  temperature: Number($env.LLM_TEMPERATURE || 0.1),\n  max_tokens: Number($env.LLM_MAX_TOKENS || 400),\n  response_format: { type: 'json_object' },\n  messages: [\n    {\n      role: 'system',\n      content: [\n        'You are a support-ticket triage classifier for a SaaS product.',\n        'Return ONLY a strict JSON object with keys: category, confidence, summary.',\n        '',\n        'Allowed categories (use verbatim):',\n        '- Login Issue',\n        '- Billing Issue',\n        '- Bug Report',\n        '- Feature Request',\n        '- Sales Inquiry',\n        '- Other',\n        '',\n        'confidence: number in [0,1], calibrated. Use <0.60 for genuinely ambiguous tickets — downstream will route those to Manual Review, which is the correct outcome for ambiguity.',\n        'summary: one sentence, <=25 words, plain English, describes the customer problem or request.',\n        '',\n        'Hard rules:',\n        '1. Return JSON only. No prose, no code fences, no extra keys.',\n        '2. Never invent or omit fields.',\n        '3. Empty/unusable input -> return category=\"Other\", low confidence, describe the situation in summary. Never refuse.'\n      ].join('\\n')\n    },\n    {\n      role: 'user',\n      content: `Ticket ID: ${$json.ticket_id || '(none)'}\\nSubject: ${$json.subject || '(empty)'}\\nMessage: ${$json.message || '(empty)'}\\n\\nReturn only the JSON object.`\n    }\n  ]\n}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "classify-with-ai",
+      "name": "Classify With AI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 560],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Run Once For All Items. Pairs each LLM response with its upstream ticket\n// by ordinal index — the HTTP Request node in this n8n build doesn't\n// preserve pairedItem metadata, but it does preserve item order, so\n// $input.all()[i] corresponds to $('Normalize CSV Ticket').all()[i].\n\nconst ALLOWED = new Set([\n  'Login Issue', 'Billing Issue', 'Bug Report',\n  'Feature Request', 'Sales Inquiry', 'Other',\n]);\n\nconst DEPT = {\n  'Login Issue':     'Support',\n  'Billing Issue':   'Finance',\n  'Bug Report':      'Engineering',\n  'Feature Request': 'Product',\n  'Sales Inquiry':   'Sales',\n  'Other':           'General Support',\n};\n\nconst EMAIL = {\n  'Support':         $env.SUPPORT_EMAIL         || 'harelaifactory@gmail.com',\n  'Finance':         $env.FINANCE_EMAIL         || 'harelaifactory@gmail.com',\n  'Engineering':     $env.ENGINEERING_EMAIL     || 'harelaifactory@gmail.com',\n  'Product':         $env.PRODUCT_EMAIL         || 'harelaifactory@gmail.com',\n  'Sales':           $env.SALES_EMAIL           || 'harelaifactory@gmail.com',\n  'General Support': $env.GENERAL_SUPPORT_EMAIL || 'harelaifactory@gmail.com',\n  'Manual Review':   $env.MANUAL_REVIEW_EMAIL   || 'harelaifactory@gmail.com',\n};\n\nconst THRESHOLD = Number($env.CONFIDENCE_THRESHOLD || 0.60);\n\nconst responses = $input.all();\n\nfunction loadOriginals() {\n  for (const name of ['Normalize CSV Ticket', 'Normalize Webhook Ticket']) {\n    try {\n      const arr = $(name).all();\n      if (arr && arr.length) return arr;\n    } catch (e) { /* not this one */ }\n  }\n  return [];\n}\nconst originals = loadOriginals();\n\nfunction llmContent(res) {\n  const paths = [\n    res?.choices?.[0]?.message?.content,\n    res?.llm_response?.choices?.[0]?.message?.content,\n    res?.data?.choices?.[0]?.message?.content,\n    res?.body?.choices?.[0]?.message?.content,\n    res?.response?.choices?.[0]?.message?.content,\n  ];\n  for (const p of paths) if (typeof p === 'string' && p.length) return p;\n  return null;\n}\n\nfunction validShape(p) {\n  if (!p || typeof p !== 'object') return false;\n  if (typeof p.category !== 'string' || !ALLOWED.has(p.category)) return false;\n  if (typeof p.confidence !== 'number' || !isFinite(p.confidence)) return false;\n  if (p.confidence < 0 || p.confidence > 1) return false;\n  if (typeof p.summary !== 'string' || p.summary.trim().length === 0) return false;\n  return true;\n}\n\nconst results = responses.map((r, i) => {\n  const res = r.json || {};\n  const orig = originals[i]?.json || {};\n\n  const out = {\n    ticket_id:       String(orig.ticket_id      ?? ''),\n    subject:         String(orig.subject        ?? ''),\n    message:         String(orig.message        ?? ''),\n    customer_email:  String(orig.customer_email ?? ''),\n    source:          String(orig.source         ?? 'unknown'),\n    category:        'Other',\n    department:      'Manual Review',\n    confidence:      0,\n    summary:         '',\n    email_recipient: EMAIL['Manual Review'],\n    processed_at:    new Date().toISOString(),\n    status:          'Manual Review',\n  };\n\n  if (!out.subject && !out.message) {\n    out.summary = 'Ticket had no subject or message; skipped classification.';\n    return { json: out };\n  }\n\n  let parsed = null;\n  let parseError = null;\n  try {\n    const raw = llmContent(res);\n    if (raw == null) throw new Error('no LLM response body on item');\n    parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;\n  } catch (e) {\n    parseError = e.message;\n  }\n\n  if (!validShape(parsed)) {\n    out.summary = parseError\n      ? `LLM response could not be parsed (${parseError}); routed to Manual Review.`\n      : 'LLM response failed schema validation; routed to Manual Review.';\n    return { json: out };\n  }\n\n  out.category   = parsed.category;\n  out.confidence = parsed.confidence;\n  out.summary    = parsed.summary.trim();\n\n  if (parsed.confidence < THRESHOLD) {\n    out.department      = 'Manual Review';\n    out.email_recipient = EMAIL['Manual Review'];\n    out.status          = 'Manual Review';\n  } else {\n    out.department      = DEPT[parsed.category];\n    out.email_recipient = EMAIL[out.department];\n    out.status          = 'Processed';\n  }\n\n  return { json: out };\n});\n\nreturn results;\n"
+      },
+      "id": "validate-enrich",
+      "name": "Validate & Enrich",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1440, 560]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+                "conditions": [ { "leftValue": "={{ $json.department }}", "rightValue": "Support",         "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" } } ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Support"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+                "conditions": [ { "leftValue": "={{ $json.department }}", "rightValue": "Finance",         "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" } } ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Finance"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+                "conditions": [ { "leftValue": "={{ $json.department }}", "rightValue": "Engineering",     "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" } } ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Engineering"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+                "conditions": [ { "leftValue": "={{ $json.department }}", "rightValue": "Product",         "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" } } ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Product"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+                "conditions": [ { "leftValue": "={{ $json.department }}", "rightValue": "Sales",           "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" } } ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Sales"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+                "conditions": [ { "leftValue": "={{ $json.department }}", "rightValue": "General Support", "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" } } ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "General Support"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+                "conditions": [ { "leftValue": "={{ $json.department }}", "rightValue": "Manual Review",   "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" } } ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Manual Review"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "Unrouted"
+        }
+      },
+      "id": "route-department",
+      "name": "Route To Department",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [1680, 560]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.SMTP_FROM }}",
+        "toEmail": "={{ $json.email_recipient }}",
+        "subject": "={{ '[Ticket #' + ($json.ticket_id || 'unknown') + '] ' + $json.category + ': ' + ($json.subject || '(no subject)') }}",
+        "emailFormat": "html",
+        "html": "=<div style=\"font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; font-size: 14px; color: #222;\">\n  <h2 style=\"margin: 0 0 12px 0;\">Ticket #{{ $json.ticket_id || 'unknown' }} — {{ $json.category }}</h2>\n  <table style=\"border-collapse: collapse; margin-bottom: 16px;\">\n    <tr><td style=\"padding: 4px 12px 4px 0; color: #666;\">Department</td><td style=\"padding: 4px 0;\"><b>{{ $json.department }}</b></td></tr>\n    <tr><td style=\"padding: 4px 12px 4px 0; color: #666;\">Customer</td><td style=\"padding: 4px 0;\">{{ $json.customer_email || '(unknown)' }}</td></tr>\n    <tr><td style=\"padding: 4px 12px 4px 0; color: #666;\">Confidence</td><td style=\"padding: 4px 0;\">{{ ($json.confidence * 100).toFixed(0) }}%</td></tr>\n    <tr><td style=\"padding: 4px 12px 4px 0; color: #666;\">Status</td><td style=\"padding: 4px 0;\">{{ $json.status }}</td></tr>\n    <tr><td style=\"padding: 4px 12px 4px 0; color: #666;\">Source</td><td style=\"padding: 4px 0;\">{{ $json.source }}</td></tr>\n  </table>\n\n  <h3 style=\"margin: 16px 0 4px 0;\">AI Summary</h3>\n  <p style=\"margin: 0 0 16px 0;\">{{ $json.summary }}</p>\n\n  <h3 style=\"margin: 16px 0 4px 0;\">Original Subject</h3>\n  <p style=\"margin: 0 0 12px 0;\">{{ $json.subject || '(none)' }}</p>\n\n  <h3 style=\"margin: 16px 0 4px 0;\">Original Message</h3>\n  <pre style=\"white-space: pre-wrap; background: #f6f8fa; padding: 12px; border-radius: 6px; margin: 0;\">{{ $json.message || '(none)' }}</pre>\n\n  <p style=\"color: #888; font-size: 12px; margin-top: 20px;\">Processed at {{ $json.processed_at }} by AI Support Ticket Classifier.</p>\n</div>",
+        "options": {}
+      },
+      "id": "send-email",
+      "name": "Send Department Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1920, 560],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "smtp": {
+          "id": "SMTP_CREDENTIAL_ID",
+          "name": "SMTP account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// This node runs on a parallel branch straight off Validate & Enrich —\n// $input.all() gives us all enriched tickets in one batch, so the node\n// fires exactly once per workflow execution. If it were downstream of\n// Send Email again, the many-to-one fan-in from the Switch would cause\n// n8n to re-trigger this node once per Switch branch, producing duplicates.\n//\n// Justification for using a Code node here:\n//   Native n8n has no atomic 'append rows to CSV file' node. Alternatives\n//   (read-merge-rewrite, spreadsheet writer with in-memory accumulator) are\n//   either unsafe under concurrency or don't survive per-item pipelines.\n//   fs.appendFileSync is 3 lines, transactional at the OS level, portable.\n\nconst fs = require(\"fs\");\nconst path = require(\"path\");\n\nconst OUT = $env.OUTPUT_CSV_PATH;\nif (!OUT) throw new Error(\"OUTPUT_CSV_PATH is not set\");\n\nconst esc = (v) => {\n  const s = v === null || v === undefined ? \"\" : String(v);\n  return /[\",\\n\\r]/.test(s) ? '\"' + s.replace(/\"/g, '\"\"') + '\"' : s;\n};\n\nconst HEADER = \"ticket_id,subject,message,customer_email,category,department,confidence,summary,email_sent_to,processed_at,status\\n\";\n\nfs.mkdirSync(path.dirname(OUT), { recursive: true });\n\nlet needsHeader = false;\ntry { needsHeader = fs.statSync(OUT).size === 0; }\ncatch (e) { needsHeader = true; }\nif (needsHeader) fs.writeFileSync(OUT, HEADER);\n\nconst tickets = $input.all().map(function (x) { return x.json || {}; });\n\nconst lines = tickets.map(function (t) {\n  return [\n    t.ticket_id, t.subject, t.message, t.customer_email,\n    t.category, t.department, t.confidence, t.summary,\n    t.email_recipient, t.processed_at, t.status,\n  ].map(esc).join(\",\");\n});\n\nif (lines.length) fs.appendFileSync(OUT, lines.join(\"\\n\") + \"\\n\");\n\nreturn tickets.map(function (t) {\n  return {\n    json: {\n      ticket_id:      t.ticket_id,\n      subject:        t.subject,\n      message:        t.message,\n      customer_email: t.customer_email,\n      source:         t.source,\n      category:       t.category,\n      department:     t.department,\n      confidence:     t.confidence,\n      summary:        t.summary,\n      email_sent_to:  t.email_recipient,\n      processed_at:   t.processed_at,\n      status:         t.status,\n    },\n  };\n});\n"
+      },
+      "id": "append-output-csv",
+      "name": "Append To Output CSV",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2160, 560],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.source }}",
+              "rightValue": "webhook",
+              "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-webhook",
+      "name": "Is Webhook?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [2400, 560]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({\n  ticket_id:  $json.ticket_id,\n  category:   $json.category,\n  department: $json.department,\n  confidence: $json.confidence,\n  summary:    $json.summary,\n  status:     $json.status,\n  email_sent_to: $json.email_sent_to,\n  processed_at:  $json.processed_at\n}) }}",
+        "options": {}
+      },
+      "id": "respond-webhook",
+      "name": "Respond To Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2640, 460]
+    },
+    {
+      "parameters": {
+        "content": "## AI Support Ticket Classifier\n\nThree triggers ➜ one shared pipeline.\n\n1. **Manual / Schedule** ➜ read a CSV from `INPUT_CSV_PATH`, split into rows, normalize.\n2. **Webhook** ➜ accept a single JSON ticket, normalize to the same shape.\n3. Every ticket takes exactly **one LLM call** returning `{category, confidence, summary}` as strict JSON.\n4. `Validate & Enrich` parses and validates the LLM output, falls back to Manual Review on any issue, and looks up the department.\n5. `Route To Department` (Switch) is the single source of routing truth — all 7 branches funnel into one shared email sender.\n6. `Append To Output CSV` writes the enriched row.\n7. Webhook executions get a JSON response; scheduled/manual executions just end.\n\nSee `README.md` for setup and `DESIGN.md` for the engineering reasoning.",
+        "height": 320,
+        "width": 520
+      },
+      "id": "sticky-overview",
+      "name": "Overview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [200, -80]
+    },
+    {
+      "parameters": {
+        "content": "### Triggers\n\n- **Manual**: use the *Test workflow* button.\n- **Schedule**: cron from `$env.CRON_SCHEDULE` (default every 6h).\n- **Webhook**: `POST /webhook/<WEBHOOK_PATH>` with a single ticket JSON body. Optional `X-Webhook-Token` shared-secret header.",
+        "height": 220,
+        "width": 260
+      },
+      "id": "sticky-triggers",
+      "name": "Triggers note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [200, 940]
+    },
+    {
+      "parameters": {
+        "content": "### LLM call\n\nOne HTTP POST to OpenAI `chat/completions` per ticket.\n- `response_format: json_object` guarantees syntactically valid JSON.\n- `retryOnFail` handles transient rate-limits/network errors.\n- `onError: continueRegularOutput` sends failed calls to the validator, which routes them to Manual Review — never blocks the batch.",
+        "height": 220,
+        "width": 320
+      },
+      "id": "sticky-llm",
+      "name": "LLM note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1160, 300]
+    },
+    {
+      "parameters": {
+        "content": "### Validate & Enrich (Code node — justified)\n\nWhy a Code node: JSON.parse in a try/catch + schema check + category→department lookup replaces 5–6 IF/Set nodes. Native chain would be brittle, hard to read, and hard to maintain.\n\nOutputs a stable shape used by every downstream node.",
+        "height": 220,
+        "width": 320
+      },
+      "id": "sticky-validator",
+      "name": "Validator note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1400, 300]
+    },
+    {
+      "parameters": {
+        "content": "### Centralized routing\n\nSwitch node routes on `department` — the single source of routing truth. All 7 branches converge into the same email sender; the Switch's job is to make the routing decision visible in the graph, not to duplicate downstream logic.",
+        "height": 220,
+        "width": 320
+      },
+      "id": "sticky-router",
+      "name": "Router note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1640, 300]
+    },
+    {
+      "parameters": {
+        "content": "### Append CSV (Code node — justified)\n\nWhy a Code node: n8n has no native single-row append. Alternatives are lossy (read-merge-rewrite) or platform-specific (Execute Command). `fs.appendFileSync` is 3 lines and transactional.\n\nRequires filesystem access in the Code sandbox — self-hosted n8n by default. See DESIGN.md for the cloud workaround.",
+        "height": 260,
+        "width": 340
+      },
+      "id": "sticky-append",
+      "name": "Append note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [2120, 300]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [[{ "node": "Read Input CSV", "type": "main", "index": 0 }]]
+    },
+    "Schedule Trigger": {
+      "main": [[{ "node": "Read Input CSV", "type": "main", "index": 0 }]]
+    },
+    "Webhook Trigger": {
+      "main": [[{ "node": "Normalize Webhook Ticket", "type": "main", "index": 0 }]]
+    },
+    "Read Input CSV": {
+      "main": [[{ "node": "Extract CSV Rows", "type": "main", "index": 0 }]]
+    },
+    "Extract CSV Rows": {
+      "main": [[{ "node": "Normalize CSV Ticket", "type": "main", "index": 0 }]]
+    },
+    "Normalize CSV Ticket": {
+      "main": [[{ "node": "Classify With AI", "type": "main", "index": 0 }]]
+    },
+    "Normalize Webhook Ticket": {
+      "main": [[{ "node": "Classify With AI", "type": "main", "index": 0 }]]
+    },
+    "Classify With AI": {
+      "main": [[{ "node": "Validate & Enrich", "type": "main", "index": 0 }]]
+    },
+    "Validate & Enrich": {
+      "main": [[
+        { "node": "Route To Department", "type": "main", "index": 0 },
+        { "node": "Append To Output CSV", "type": "main", "index": 0 }
+      ]]
+    },
+    "Route To Department": {
+      "main": [
+        [{ "node": "Send Department Email", "type": "main", "index": 0 }],
+        [{ "node": "Send Department Email", "type": "main", "index": 0 }],
+        [{ "node": "Send Department Email", "type": "main", "index": 0 }],
+        [{ "node": "Send Department Email", "type": "main", "index": 0 }],
+        [{ "node": "Send Department Email", "type": "main", "index": 0 }],
+        [{ "node": "Send Department Email", "type": "main", "index": 0 }],
+        [{ "node": "Send Department Email", "type": "main", "index": 0 }],
+        [{ "node": "Send Department Email", "type": "main", "index": 0 }]
+      ]
+    },
+    "Send Department Email": {
+      "main": [[]]
+    },
+    "Append To Output CSV": {
+      "main": [[{ "node": "Is Webhook?", "type": "main", "index": 0 }]]
+    },
+    "Is Webhook?": {
+      "main": [
+        [{ "node": "Respond To Webhook", "type": "main", "index": 0 }],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": [
+    { "name": "ticket-classifier" },
+    { "name": "AI" }
+  ]
+}
