@@ -1,0 +1,13 @@
+ticket_id,subject,message,customer_email
+10001,Can't login,Password reset doesn't work,user1@test.com
+10002,Login page stuck,Spinner keeps loading,user2@test.com
+10003,Invoice missing,Didn't receive invoice for last payment,billing1@test.com
+10004,Charged twice,I was billed twice for my subscription,billing2@test.com
+10005,App crashes on launch,Android app crashes immediately,bug1@test.com
+10006,Export feature broken,CSV export returns empty file,bug2@test.com
+10007,Request dark mode,Please add dark mode to the app,product1@test.com
+10008,Need API access,Is there an API for integrations?,product2@test.com
+10009,Pricing question,Do you offer discounts for teams?,sales1@test.com
+10010,Enterprise plan inquiry,Looking for enterprise pricing,sales2@test.com
+10011,General question,Hello how are you today,misc1@test.com
+10012,,,empty@test.com

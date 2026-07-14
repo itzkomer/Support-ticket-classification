@@ -1,0 +1,13 @@
+ticket_id,subject,message,customer_email,category,department,confidence,summary,email_sent_to,processed_at,status
+10001,Can't login,Password reset doesn't work,user1@test.com,Login Issue,Support,0.94,Customer cannot reset their password.,harelaifactory@gmail.com,2026-07-12T09:15:22.104Z,Processed
+10002,Login page stuck,Spinner keeps loading,user2@test.com,Login Issue,Support,0.88,Login page hangs on a loading spinner.,harelaifactory@gmail.com,2026-07-12T09:15:23.512Z,Processed
+10003,Invoice missing,Didn't receive invoice for last payment,billing1@test.com,Billing Issue,Finance,0.92,Customer did not receive an invoice for their most recent payment.,harelaifactory@gmail.com,2026-07-12T09:15:24.887Z,Processed
+10004,Charged twice,I was billed twice for my subscription,billing2@test.com,Billing Issue,Finance,0.96,Customer was double-charged for their subscription.,harelaifactory@gmail.com,2026-07-12T09:15:26.223Z,Processed
+10005,App crashes on launch,Android app crashes immediately,bug1@test.com,Bug Report,Engineering,0.95,Android app crashes on launch.,harelaifactory@gmail.com,2026-07-12T09:15:27.601Z,Processed
+10006,Export feature broken,CSV export returns empty file,bug2@test.com,Bug Report,Engineering,0.93,CSV export produces an empty file.,harelaifactory@gmail.com,2026-07-12T09:15:28.940Z,Processed
+10007,Request dark mode,Please add dark mode to the app,product1@test.com,Feature Request,Product,0.97,Customer requests a dark mode.,harelaifactory@gmail.com,2026-07-12T09:15:30.315Z,Processed
+10008,Need API access,Is there an API for integrations?,product2@test.com,Feature Request,Product,0.72,Customer asks whether an integration API exists.,harelaifactory@gmail.com,2026-07-12T09:15:31.702Z,Processed
+10009,Pricing question,Do you offer discounts for teams?,sales1@test.com,Sales Inquiry,Sales,0.9,Customer asks about team discounts.,harelaifactory@gmail.com,2026-07-12T09:15:33.098Z,Processed
+10010,Enterprise plan inquiry,Looking for enterprise pricing,sales2@test.com,Sales Inquiry,Sales,0.94,Customer requests enterprise pricing information.,harelaifactory@gmail.com,2026-07-12T09:15:34.487Z,Processed
+10011,General question,Hello how are you today,misc1@test.com,Other,General Support,0.4,Customer greeted the team with no clear question.,harelaifactory@gmail.com,2026-07-12T09:15:35.912Z,Manual Review
+10012,,,empty@test.com,Other,Manual Review,0,Ticket had no subject or message and could not be classified.,harelaifactory@gmail.com,2026-07-12T09:15:37.301Z,Manual Review
